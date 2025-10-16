@@ -1,0 +1,20 @@
+[package]
+name = "coolprop"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+links = "coolprop"
+
+[features]
+default = ["vendored"]
+vendored = []
+
+[dependencies]
+thiserror = "1"
+
+[build-dependencies]
+bindgen = "0.72.1"
+cmake = "0.1.54"
+
+[dev-dependencies]
+anyhow = "1.0.100"
