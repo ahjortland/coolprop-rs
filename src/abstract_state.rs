@@ -33,6 +33,26 @@ pub struct AbstractState {
     handle: c_long,
 }
 
+impl Clone for AbstractState {
+    fn clone(&self) -> Self {
+        let _indices = self.indices;
+        let backend = self
+            .backend_name()
+            .expect("backend_name() failed while cloning AbstractState");
+        let fluid = self
+            .fluid_names()
+            .expect("fluid_names() failed while cloning AbstractState");
+        let cloned =
+            AbstractState::new(&backend, &fluid).expect("failed to construct cloned AbstractState");
+
+        if let Ok(fractions) = self.mole_fractions() {
+            let _ = cloned.set_fractions(&fractions);
+        }
+
+        cloned
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct BatchCommonOutputs {
     pub temperature: Vec<f64>,
@@ -184,13 +204,7 @@ impl AbstractState {
     pub fn fluid_names(&self) -> Result<String> {
         let mut buffer = vec![0 as c_char; DEFAULT_STR_BUF_LEN];
         call_with_error(|err, msg, len| unsafe {
-            crate::ffi::AbstractState_fluid_names(
-                self.handle,
-                buffer.as_mut_ptr(),
-                err,
-                msg,
-                len,
-            );
+            crate::ffi::AbstractState_fluid_names(self.handle, buffer.as_mut_ptr(), err, msg, len);
         })?;
         Ok(c_buf_to_string(&buffer))
     }
@@ -199,13 +213,7 @@ impl AbstractState {
     pub fn backend_name(&self) -> Result<String> {
         let mut buffer = vec![0 as c_char; DEFAULT_STR_BUF_LEN];
         call_with_error(|err, msg, len| unsafe {
-            crate::ffi::AbstractState_backend_name(
-                self.handle,
-                buffer.as_mut_ptr(),
-                err,
-                msg,
-                len,
-            );
+            crate::ffi::AbstractState_backend_name(self.handle, buffer.as_mut_ptr(), err, msg, len);
         })?;
         Ok(c_buf_to_string(&buffer))
     }
@@ -264,13 +272,7 @@ impl AbstractState {
     pub fn saturated_liquid_keyed_output(&self, param: Param) -> Result<f64> {
         let id = self.indices.id_of_param(param);
         call_with_error(|err, msg, len| unsafe {
-            crate::ffi::AbstractState_saturated_liquid_keyed_output(
-                self.handle,
-                id,
-                err,
-                msg,
-                len,
-            )
+            crate::ffi::AbstractState_saturated_liquid_keyed_output(self.handle, id, err, msg, len)
         })
     }
 
@@ -1100,4 +1102,71 @@ fn detect_filled_prefix(a: &[f64], b: &[f64], c: &[f64]) -> usize {
         }
     }
     last
+}
+
+#[cfg(test)]
+mod internal_tests {
+    use super::{approx_one, buffer_saturated, detect_filled_prefix, reshape_phase_compositions};
+
+    #[test]
+    fn approx_one_tolerance() {
+        assert!(approx_one(1.0));
+        assert!(approx_one(1.0 + 5e-7));
+        assert!(!approx_one(1.0 + 1e-4));
+    }
+
+    #[test]
+    fn buffer_saturated_detection() {
+        let mut buf = vec![0i8; 4];
+        buf[0] = b'a' as i8;
+        buf[1] = 0;
+        assert!(!buffer_saturated(&buf));
+        // No NUL in buffer is treated as saturated
+        let no_nul = vec![b'a' as i8, b'b' as i8, b'c' as i8];
+        assert!(buffer_saturated(&no_nul));
+        // NUL at the end indicates saturation
+        let end_nul = vec![b'x' as i8, b'y' as i8, 0];
+        assert!(buffer_saturated(&end_nul));
+    }
+
+    #[test]
+    fn reshape_phase_compositions_handles_layouts() {
+        // Point-major (points x components)
+        // Two points, three components; each row sums to 1
+        let flat_point_major = vec![
+            0.2, 0.3, 0.5, // point 0
+            0.1, 0.6, 0.3, // point 1
+        ];
+        let reshaped_pm = reshape_phase_compositions(&flat_point_major, 2, 3);
+        assert_eq!(reshaped_pm.len(), 3); // components
+        assert_eq!(reshaped_pm[0], vec![0.2, 0.1]);
+        assert_eq!(reshaped_pm[1], vec![0.3, 0.6]);
+        assert_eq!(reshaped_pm[2], vec![0.5, 0.3]);
+
+        // Component-major fallback (components x points)
+        // Provide data that does not sum to 1 by point-major rows to force fallback path
+        let flat_component_major = vec![
+            0.2, 0.1, // comp 0
+            0.3, 0.2, // comp 1
+            0.5, 0.7, // comp 2 (rows won't sum to 1 for both points)
+        ];
+        let reshaped_cm = reshape_phase_compositions(&flat_component_major, 2, 3);
+        assert_eq!(reshaped_cm.len(), 3);
+        assert_eq!(reshaped_cm[0], vec![0.2, 0.1]);
+        assert_eq!(reshaped_cm[1], vec![0.3, 0.2]);
+        assert_eq!(reshaped_cm[2], vec![0.5, 0.7]);
+    }
+
+    #[test]
+    fn detect_filled_prefix_counts_any_finite() {
+        let a = [f64::NAN, 1.0, f64::NAN, f64::NAN];
+        let b = [f64::NAN, f64::NAN, 2.0, f64::NAN];
+        let c = [f64::NAN, f64::NAN, f64::NAN, 3.0];
+        // Up to index 3 we have some finite entries; trailing none are absent
+        assert_eq!(detect_filled_prefix(&a, &b, &c), 4);
+        let a2 = [f64::NAN, f64::NAN];
+        let b2 = [f64::NAN, f64::NAN];
+        let c2 = [f64::NAN, f64::NAN];
+        assert_eq!(detect_filled_prefix(&a2, &b2, &c2), 0);
+    }
 }
