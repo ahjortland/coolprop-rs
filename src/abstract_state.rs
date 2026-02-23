@@ -3,7 +3,10 @@ use crate::{
     indices::{Indices, InputPair, Param, Phase, global_indices},
 };
 use std::{
-    ffi::{CStr, CString},
+    cell::Cell,
+    ffi::CString,
+    fmt,
+    marker::PhantomData,
     os::raw::{c_char, c_long},
     ptr,
 };
@@ -28,62 +31,72 @@ const DEFAULT_STR_BUF_LEN: usize = 1024;
 ///
 /// All methods return errors when CoolProp raises one; the message from CoolProp is included in the
 /// [`crate::Error`]. Each instance owns its handle and releases it automatically when dropped.
+///
+/// # Threading
+///
+/// `AbstractState` is `Send` but not `Sync`. Move state objects between threads if needed, but do
+/// not share a single instance concurrently.
 pub struct AbstractState {
     indices: &'static Indices,
     handle: c_long,
+    // CoolProp state objects are not safe to share across threads concurrently.
+    // This keeps `Send` while preventing `Sync`.
+    _not_sync: PhantomData<Cell<()>>,
 }
 
-impl Clone for AbstractState {
-    fn clone(&self) -> Self {
-        let _indices = self.indices;
-        let backend = self
-            .backend_name()
-            .expect("backend_name() failed while cloning AbstractState");
-        let fluid = self
-            .fluid_names()
-            .expect("fluid_names() failed while cloning AbstractState");
-        let cloned =
-            AbstractState::new(&backend, &fluid).expect("failed to construct cloned AbstractState");
-
-        if let Ok(fractions) = self.mole_fractions() {
-            let _ = cloned.set_fractions(&fractions);
-        }
-
-        cloned
-    }
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
+/// Outputs returned by [`AbstractState::update_and_common_out`].
 pub struct BatchCommonOutputs {
+    /// Temperature at each sampled input state, in kelvin.
     pub temperature: Vec<f64>,
+    /// Pressure at each sampled input state, in pascals.
     pub pressure: Vec<f64>,
+    /// Molar density at each sampled input state, in mol/m^3.
     pub rhomolar: Vec<f64>,
+    /// Molar enthalpy at each sampled input state, in J/mol.
     pub hmolar: Vec<f64>,
+    /// Molar entropy at each sampled input state, in J/(mol*K).
     pub smolar: Vec<f64>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
+/// Full phase-envelope data extracted from CoolProp.
 pub struct PhaseEnvelope {
+    /// Saturation temperature coordinates, in kelvin.
     pub temperature: Vec<f64>,
+    /// Saturation pressure coordinates, in pascals.
     pub pressure: Vec<f64>,
+    /// Saturated-liquid molar density branch, in mol/m^3.
     pub rhomolar_liq: Vec<f64>,
+    /// Saturated-vapor molar density branch, in mol/m^3.
     pub rhomolar_vap: Vec<f64>,
+    /// Liquid composition matrix indexed as `x[component][point]`.
     pub x: Vec<Vec<f64>>,
+    /// Vapor composition matrix indexed as `y[component][point]`.
     pub y: Vec<Vec<f64>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
+/// Spinodal-curve sample points from CoolProp.
 pub struct SpinodalCurve {
+    /// Reduced inverse temperature `tau = Tc / T`.
     pub tau: Vec<f64>,
+    /// Reduced density `delta = rho / rho_c`.
     pub delta: Vec<f64>,
+    /// Leading eigenvalue along the spinodal track.
     pub m1: Vec<f64>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+/// Critical point candidate returned by CoolProp for mixtures.
 pub struct CriticalPoint {
+    /// Temperature of the critical point, in kelvin.
     pub temperature: f64,
+    /// Pressure of the critical point, in pascals.
     pub pressure: f64,
+    /// Molar density of the critical point, in mol/m^3.
     pub rhomolar: f64,
+    /// Stability flag reported by CoolProp.
     pub stable: bool,
 }
 
@@ -111,7 +124,37 @@ impl AbstractState {
             crate::ffi::AbstractState_factory(backend.as_ptr(), fluid.as_ptr(), err, msg, len)
         })?;
 
-        Ok(Self { indices, handle })
+        Ok(Self {
+            indices,
+            handle,
+            _not_sync: PhantomData,
+        })
+    }
+
+    /// Attempt to clone this state by reconstructing a fresh backend instance.
+    ///
+    /// CoolProp does not expose a native clone operation through its C API, so this method
+    /// retrieves backend/fluid metadata and constructs a new state handle with the same
+    /// configuration. When mole fractions are available, they are copied to the new state.
+    pub fn try_clone(&self) -> Result<Self> {
+        let backend = self.backend_name()?;
+        let fluid = self.fluid_names()?;
+        let mut cloned = match Self::new(&backend, &fluid) {
+            Ok(state) => state,
+            Err(initial_err) => {
+                let normalized_fluid = fluid.replace(',', "&");
+                if normalized_fluid == fluid {
+                    return Err(initial_err);
+                }
+                Self::new(&backend, &normalized_fluid)?
+            }
+        };
+
+        if let Ok(fractions) = self.mole_fractions() {
+            let _ = cloned.set_fractions(&fractions);
+        }
+
+        Ok(cloned)
     }
 
     /// Raw CoolProp handle for advanced FFI integrations.
@@ -119,6 +162,7 @@ impl AbstractState {
     /// Most users should rely on the safe wrappers; this accessor exists so that external callers
     /// can bridge to additional CoolProp entry points not yet covered by this crate.
     #[inline]
+    #[must_use = "the raw handle is only useful if it is consumed by downstream FFI code"]
     pub fn handle(&self) -> c_long {
         self.handle
     }
@@ -134,7 +178,7 @@ impl AbstractState {
     ///
     /// Propagates CoolProp errors (invalid pair for current phase, out-of-range inputs, etc.).
     #[inline]
-    pub fn update(&self, pair: InputPair, v1: f64, v2: f64) -> Result<()> {
+    pub fn update(&mut self, pair: InputPair, v1: f64, v2: f64) -> Result<()> {
         let id = self.indices.id_of_pair(pair);
         call_with_error(|err, msg, len| unsafe {
             crate::ffi::AbstractState_update(self.handle, id, v1, v2, err, msg, len);
@@ -162,7 +206,7 @@ impl AbstractState {
     ///
     /// Shorthand for `update(InputPair::DmolarT, dmolar, t)`.
     #[inline]
-    pub fn update_dmolar_t(&self, dmolar: f64, t: f64) -> Result<()> {
+    pub fn update_dmolar_t(&mut self, dmolar: f64, t: f64) -> Result<()> {
         self.update(InputPair::DmolarT, dmolar, t)
     }
 
@@ -179,7 +223,7 @@ impl AbstractState {
     /// Some iterative schemes benefit from constraining CoolProp to a specific phase branch.
     /// Pass [`Phase::NotImposed`] (via [`unspecify_phase`](Self::unspecify_phase)) to release the
     /// constraint.
-    pub fn specify_phase(&self, phase: Phase) -> Result<()> {
+    pub fn specify_phase(&mut self, phase: Phase) -> Result<()> {
         let token = phase.specifier_token();
         let phase = CString::new(token).map_err(|source| Error::EmbeddedNul {
             label: "phase specifier",
@@ -191,7 +235,7 @@ impl AbstractState {
     }
 
     /// Remove any previously imposed phase constraint.
-    pub fn unspecify_phase(&self) -> Result<()> {
+    pub fn unspecify_phase(&mut self) -> Result<()> {
         call_with_error(|err, msg, len| unsafe {
             crate::ffi::AbstractState_unspecify_phase(self.handle, err, msg, len);
         })
@@ -202,20 +246,20 @@ impl AbstractState {
     /// For pure fluids this matches the string passed to [`new`](Self::new); for mixtures, CoolProp
     /// returns the expanded component list.
     pub fn fluid_names(&self) -> Result<String> {
-        let mut buffer = vec![0 as c_char; DEFAULT_STR_BUF_LEN];
+        let mut buffer = [0 as c_char; DEFAULT_STR_BUF_LEN];
         call_with_error(|err, msg, len| unsafe {
             crate::ffi::AbstractState_fluid_names(self.handle, buffer.as_mut_ptr(), err, msg, len);
         })?;
-        Ok(c_buf_to_string(&buffer))
+        Ok(crate::c_buf_to_string(&buffer))
     }
 
     /// Name of the active CoolProp backend (e.g., `"HEOS"`, `"REFPROP"`).
     pub fn backend_name(&self) -> Result<String> {
-        let mut buffer = vec![0 as c_char; DEFAULT_STR_BUF_LEN];
+        let mut buffer = [0 as c_char; DEFAULT_STR_BUF_LEN];
         call_with_error(|err, msg, len| unsafe {
             crate::ffi::AbstractState_backend_name(self.handle, buffer.as_mut_ptr(), err, msg, len);
         })?;
-        Ok(c_buf_to_string(&buffer))
+        Ok(crate::c_buf_to_string(&buffer))
     }
 
     /// Query a string-valued fluid parameter.
@@ -247,7 +291,7 @@ impl AbstractState {
                 );
             }) {
                 Ok(()) if !buffer_saturated(&buffer) => {
-                    return Ok(c_buf_to_string(&buffer));
+                    return Ok(crate::c_buf_to_string(&buffer));
                 }
                 Ok(()) => {
                     capacity *= 2;
@@ -441,10 +485,27 @@ impl AbstractState {
     /// Set molar composition fractions for mixtures.
     ///
     /// `fractions` must sum to one; CoolProp enforces additional backend-specific constraints.
-    pub fn set_fractions(&self, fractions: &[f64]) -> Result<()> {
+    pub fn set_fractions(&mut self, fractions: &[f64]) -> Result<()> {
         let len = fractions.len() as c_long;
         call_with_error(|err, msg, buflen| unsafe {
             crate::ffi::AbstractState_set_fractions(
+                self.handle,
+                fractions.as_ptr(),
+                len,
+                err,
+                msg,
+                buflen,
+            );
+        })
+    }
+
+    /// Set mass composition fractions for mixtures.
+    ///
+    /// `fractions` must sum to one; interpretation is backend dependent.
+    pub fn set_mass_fractions(&mut self, fractions: &[f64]) -> Result<()> {
+        let len = fractions.len() as c_long;
+        call_with_error(|err, msg, buflen| unsafe {
+            crate::ffi::AbstractState_set_mass_fractions(
                 self.handle,
                 fractions.as_ptr(),
                 len,
@@ -472,6 +533,44 @@ impl AbstractState {
             let mut count: c_long = 0;
             match call_with_error(|err, msg, buflen| unsafe {
                 crate::ffi::AbstractState_get_mole_fractions(
+                    self.handle,
+                    fractions.as_mut_ptr(),
+                    capacity as c_long,
+                    &mut count,
+                    err,
+                    msg,
+                    buflen,
+                );
+            }) {
+                Ok(()) => {
+                    let actual = count.max(0) as usize;
+                    if actual > capacity {
+                        capacity = actual.max(capacity * 2);
+                        continue;
+                    }
+                    fractions.truncate(actual);
+                    return Ok(fractions);
+                }
+                Err(err) => {
+                    let msg = err.to_string();
+                    if msg.contains("buffer") || msg.contains("Length of array") {
+                        capacity = capacity.max(1) * 2;
+                        continue;
+                    }
+                    return Err(err);
+                }
+            }
+        }
+    }
+
+    /// Retrieve the current mass composition as a vector with automatic sizing.
+    pub fn mass_fractions(&self) -> Result<Vec<f64>> {
+        let mut capacity = self.estimated_component_capacity()?;
+        loop {
+            let mut fractions = vec![0.0; capacity];
+            let mut count: c_long = 0;
+            match call_with_error(|err, msg, buflen| unsafe {
+                crate::ffi::AbstractState_get_mass_fractions(
                     self.handle,
                     fractions.as_mut_ptr(),
                     capacity as c_long,
@@ -569,7 +668,7 @@ impl AbstractState {
     /// Returns temperature, pressure, molar density, molar enthalpy, and molar entropy arrays in
     /// a single struct. The returned vectors always match the length of the input slices.
     pub fn update_and_common_out(
-        &self,
+        &mut self,
         pair: InputPair,
         value1: &[f64],
         value2: &[f64],
@@ -614,7 +713,7 @@ impl AbstractState {
 
     /// Batched update returning a single additional property as an owned vector.
     pub fn update_and_1_out(
-        &self,
+        &mut self,
         pair: InputPair,
         value1: &[f64],
         value2: &[f64],
@@ -648,7 +747,7 @@ impl AbstractState {
 
     /// Batched update returning five arbitrary properties as owned vectors.
     pub fn update_and_5_out(
-        &self,
+        &mut self,
         pair: InputPair,
         value1: &[f64],
         value2: &[f64],
@@ -693,7 +792,7 @@ impl AbstractState {
     /// Arguments `i` and `j` index the components, `parameter` is the CoolProp keyword, and
     /// `value` is supplied in backend-specific units.
     pub fn set_binary_interaction_double(
-        &self,
+        &mut self,
         i: c_long,
         j: c_long,
         parameter: &str,
@@ -719,7 +818,7 @@ impl AbstractState {
 
     /// Set custom coefficients for cubic equation-of-state alpha functions.
     pub fn set_cubic_alpha_c(
-        &self,
+        &mut self,
         i: c_long,
         parameter: &str,
         c1: f64,
@@ -746,7 +845,12 @@ impl AbstractState {
     }
 
     /// Override a scalar fluid parameter on a per-component basis.
-    pub fn set_fluid_parameter_double(&self, i: c_long, parameter: &str, value: f64) -> Result<()> {
+    pub fn set_fluid_parameter_double(
+        &mut self,
+        i: c_long,
+        parameter: &str,
+        value: f64,
+    ) -> Result<()> {
         let parameter = CString::new(parameter).map_err(|source| Error::EmbeddedNul {
             label: "parameter",
             source,
@@ -767,7 +871,7 @@ impl AbstractState {
     /// Trigger CoolProp's phase-envelope construction for the current mixture.
     ///
     /// `level` controls the resolution/detail as understood by CoolProp.
-    pub fn build_phase_envelope(&self, level: &str) -> Result<()> {
+    pub fn build_phase_envelope(&mut self, level: &str) -> Result<()> {
         let level = CString::new(level).map_err(|source| Error::EmbeddedNul {
             label: "level",
             source,
@@ -926,7 +1030,7 @@ impl AbstractState {
     }
 
     /// Build the spinodal curve for the current mixture.
-    pub fn build_spinodal(&self) -> Result<()> {
+    pub fn build_spinodal(&mut self) -> Result<()> {
         call_with_error(|err, msg, len| unsafe {
             crate::ffi::AbstractState_build_spinodal(self.handle, err, msg, len);
         })
@@ -1024,6 +1128,22 @@ impl Drop for AbstractState {
     }
 }
 
+impl fmt::Debug for AbstractState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let backend = self
+            .backend_name()
+            .unwrap_or_else(|_| String::from("<unavailable>"));
+        let fluids = self
+            .fluid_names()
+            .unwrap_or_else(|_| String::from("<unavailable>"));
+        f.debug_struct("AbstractState")
+            .field("handle", &self.handle)
+            .field("backend", &backend)
+            .field("fluids", &fluids)
+            .finish()
+    }
+}
+
 fn call_with_error<R>(f: impl FnOnce(*mut c_long, *mut c_char, c_long) -> R) -> Result<R> {
     let mut err: c_long = 0;
     let mut buf = [0 as c_char; ERR_BUF_LEN];
@@ -1033,9 +1153,9 @@ fn call_with_error<R>(f: impl FnOnce(*mut c_long, *mut c_char, c_long) -> R) -> 
         ERR_BUF_LEN as c_long,
     );
     if err != 0 {
-        let message = unsafe { CStr::from_ptr(buf.as_ptr()) }
-            .to_string_lossy()
-            .into_owned();
+        // Protect against non-terminated writes from the C side.
+        buf[ERR_BUF_LEN - 1] = 0;
+        let message = crate::c_buf_to_string(&buf);
         return Err(Error::CoolProp {
             code: err as i64,
             message,
@@ -1044,11 +1164,6 @@ fn call_with_error<R>(f: impl FnOnce(*mut c_long, *mut c_char, c_long) -> R) -> 
     Ok(result)
 }
 
-fn c_buf_to_string(buf: &[c_char]) -> String {
-    unsafe { CStr::from_ptr(buf.as_ptr()) }
-        .to_string_lossy()
-        .into_owned()
-}
 fn buffer_saturated(buf: &[c_char]) -> bool {
     match buf.iter().position(|&c| c == 0) {
         Some(pos) => pos + 1 >= buf.len(),
@@ -1056,41 +1171,18 @@ fn buffer_saturated(buf: &[c_char]) -> bool {
     }
 }
 
-fn approx_one(value: f64) -> bool {
-    (value - 1.0).abs() < 1e-6
-}
-
 fn reshape_phase_compositions(flat: &[f64], points: usize, components: usize) -> Vec<Vec<f64>> {
     if points == 0 || components == 0 {
         return Vec::new();
     }
-    let mut sums_point_major = vec![0.0; points];
+    debug_assert!(flat.len() >= points * components);
+    let mut result = vec![vec![0.0; points]; components];
     for point in 0..points {
         for comp in 0..components {
-            sums_point_major[point] += flat[point * components + comp];
+            result[comp][point] = flat[point * components + comp];
         }
     }
-    let point_major_valid = sums_point_major.iter().all(|&s| approx_one(s));
-
-    if point_major_valid {
-        let mut result = vec![vec![0.0; points]; components];
-        for point in 0..points {
-            for comp in 0..components {
-                result[comp][point] = flat[point * components + comp];
-            }
-        }
-        result
-    } else {
-        let mut result = Vec::with_capacity(components);
-        for comp in 0..components {
-            let mut row = Vec::with_capacity(points);
-            for point in 0..points {
-                row.push(flat[comp * points + point]);
-            }
-            result.push(row);
-        }
-        result
-    }
+    result
 }
 
 fn detect_filled_prefix(a: &[f64], b: &[f64], c: &[f64]) -> usize {
@@ -1106,14 +1198,7 @@ fn detect_filled_prefix(a: &[f64], b: &[f64], c: &[f64]) -> usize {
 
 #[cfg(test)]
 mod internal_tests {
-    use super::{approx_one, buffer_saturated, detect_filled_prefix, reshape_phase_compositions};
-
-    #[test]
-    fn approx_one_tolerance() {
-        assert!(approx_one(1.0));
-        assert!(approx_one(1.0 + 5e-7));
-        assert!(!approx_one(1.0 + 1e-4));
-    }
+    use super::{buffer_saturated, detect_filled_prefix, reshape_phase_compositions};
 
     #[test]
     fn buffer_saturated_detection() {
@@ -1137,24 +1222,11 @@ mod internal_tests {
             0.2, 0.3, 0.5, // point 0
             0.1, 0.6, 0.3, // point 1
         ];
-        let reshaped_pm = reshape_phase_compositions(&flat_point_major, 2, 3);
-        assert_eq!(reshaped_pm.len(), 3); // components
-        assert_eq!(reshaped_pm[0], vec![0.2, 0.1]);
-        assert_eq!(reshaped_pm[1], vec![0.3, 0.6]);
-        assert_eq!(reshaped_pm[2], vec![0.5, 0.3]);
-
-        // Component-major fallback (components x points)
-        // Provide data that does not sum to 1 by point-major rows to force fallback path
-        let flat_component_major = vec![
-            0.2, 0.1, // comp 0
-            0.3, 0.2, // comp 1
-            0.5, 0.7, // comp 2 (rows won't sum to 1 for both points)
-        ];
-        let reshaped_cm = reshape_phase_compositions(&flat_component_major, 2, 3);
-        assert_eq!(reshaped_cm.len(), 3);
-        assert_eq!(reshaped_cm[0], vec![0.2, 0.1]);
-        assert_eq!(reshaped_cm[1], vec![0.3, 0.2]);
-        assert_eq!(reshaped_cm[2], vec![0.5, 0.7]);
+        let reshaped = reshape_phase_compositions(&flat_point_major, 2, 3);
+        assert_eq!(reshaped.len(), 3); // components
+        assert_eq!(reshaped[0], vec![0.2, 0.1]);
+        assert_eq!(reshaped[1], vec![0.3, 0.6]);
+        assert_eq!(reshaped[2], vec![0.5, 0.3]);
     }
 
     #[test]

@@ -21,8 +21,9 @@ pub use bindings::*;
 #[cfg(test)]
 mod tests {
     use super::{
-        get_global_param_string, get_input_pair_index, get_param_index, set_config_bool,
-        set_config_double, set_config_string, HAPropsSI, PropsSI,
+        HAPropsSI, PhaseSI, Props1SI, PropsSI, get_fluid_param_string, get_global_param_string,
+        get_input_pair_index, get_param_index, set_config_bool, set_config_double,
+        set_config_string, set_reference_stateS,
     };
     use std::{
         ffi::{CStr, CString},
@@ -118,12 +119,52 @@ mod tests {
             "get_global_param_string failed with status {status}"
         );
 
-        let version = unsafe { CStr::from_ptr(buffer.as_ptr()) }
-            .to_string_lossy()
-            .into_owned();
+        let buffer_len = buffer.len();
+        buffer[buffer_len - 1] = 0;
+        let bytes =
+            unsafe { std::slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), buffer.len()) };
+        let version = CStr::from_bytes_until_nul(bytes)
+            .map(|v| v.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| {
+                String::from_utf8_lossy(bytes)
+                    .trim_end_matches('\0')
+                    .to_string()
+            });
         assert!(
             !version.trim().is_empty(),
             "CoolProp version string is empty"
         );
+
+        let pcrit = unsafe { Props1SI(c_string("Water").as_ptr(), c_string("pcrit").as_ptr()) };
+        assert!(pcrit.is_finite());
+
+        let mut phase_buffer = vec![0 as c_char; 64];
+        let phase_status = unsafe {
+            PhaseSI(
+                c_string("P").as_ptr(),
+                101_325.0,
+                c_string("T").as_ptr(),
+                300.0,
+                c_string("Water").as_ptr(),
+                phase_buffer.as_mut_ptr(),
+                phase_buffer.len() as c_int,
+            )
+        };
+        assert!(phase_status == 1);
+
+        let mut alias_buffer = vec![0 as c_char; 128];
+        let alias_status = unsafe {
+            get_fluid_param_string(
+                c_string("Water").as_ptr(),
+                c_string("aliases").as_ptr(),
+                alias_buffer.as_mut_ptr(),
+                alias_buffer.len() as c_int,
+            )
+        };
+        assert!(alias_status == 1);
+
+        let ref_status =
+            unsafe { set_reference_stateS(c_string("Water").as_ptr(), c_string("DEF").as_ptr()) };
+        assert!(ref_status == 1);
     }
 }

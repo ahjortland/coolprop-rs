@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2024"
 build = "build.rs"
 links = "coolprop"
+description = "Safe, idiomatic Rust bindings for the CoolProp thermophysical property library."
+repository = "https://github.com/ahjortland/coolprop-rs"
+readme = "README.md"
+license = "MIT"
+keywords = ["thermodynamics", "coolprop", "engineering", "physics", "ffi"]
+categories = ["science", "api-bindings"]
 
 [features]
 default = ["vendored"]
@@ -18,3 +24,4 @@ cmake = "0.1.54"
 
 [dev-dependencies]
 anyhow = "1.0.100"
+static_assertions = "1.1.0"

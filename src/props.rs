@@ -281,3 +281,21 @@ pub fn props_si(
     };
     check_finite_and_report_error(value, &context)
 }
+
+/// Calculate a state-independent fluid property using CoolProp `Props1SI`.
+///
+/// Typical outputs include constants such as critical temperature (`"Tcrit"`), critical pressure
+/// (`"pcrit"`), or molar mass (`"molar_mass"`).
+pub fn props1_si(output: &str, fluid: &str) -> Result<f64> {
+    let context = format!("Props1SI({fluid}, {output})");
+    let output_c = CString::new(output).map_err(|source| Error::EmbeddedNul {
+        label: "output",
+        source,
+    })?;
+    let fluid_c = CString::new(fluid).map_err(|source| Error::EmbeddedNul {
+        label: "fluid",
+        source,
+    })?;
+    let value = unsafe { ffi::Props1SI(fluid_c.as_ptr(), output_c.as_ptr()) };
+    check_finite_and_report_error(value, &context)
+}

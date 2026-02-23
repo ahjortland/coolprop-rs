@@ -93,7 +93,11 @@ fn main() {
 
     let lib_dir = env_var("COOLPROP_LIB_DIR")
         .or_else(|| lib_path.as_ref().and_then(|path| parent_dir(path)))
-        .or_else(|| vendor_artifacts.as_ref().map(|a| a.lib_dir.display().to_string()))
+        .or_else(|| {
+            vendor_artifacts
+                .as_ref()
+                .map(|a| a.lib_dir.display().to_string())
+        })
         .unwrap_or_else(|| {
             panic!(
                 "COOLPROP_LIB_DIR is unset and no library path was provided; \
@@ -183,10 +187,8 @@ fn emit_link_flags(lib_dir: &str, lib_name: &str, link_static: bool, link_cxx: b
         println!("cargo:rustc-link-lib={lib_name}");
     }
 
-    if link_cxx {
-        if let Some(cxx_lib) = env_var("COOLPROP_CXX_STDLIB").or_else(default_cxx_stdlib) {
-            println!("cargo:rustc-link-lib={cxx_lib}");
-        }
+    if link_cxx && let Some(cxx_lib) = env_var("COOLPROP_CXX_STDLIB").or_else(default_cxx_stdlib) {
+        println!("cargo:rustc-link-lib={cxx_lib}");
     }
 }
 
@@ -299,10 +301,18 @@ fn generate_bindings(include_dir: Option<String>) {
         .header(header.to_string_lossy())
         .allowlist_function("AbstractState_.*")
         .allowlist_function("PropsSI")
+        .allowlist_function("Props1SI")
         .allowlist_function("HAPropsSI")
+        .allowlist_function("PhaseSI")
+        .allowlist_function("get_fluid_param_string")
+        .allowlist_function("get_fluid_param_string_len")
         .allowlist_function("get_input_pair_index")
         .allowlist_function("get_param_index")
         .allowlist_function("get_global_param_string")
+        .allowlist_function("get_config_bool")
+        .allowlist_function("get_config_double")
+        .allowlist_function("get_config_string")
+        .allowlist_function("set_reference_stateS")
         .allowlist_function("set_config_string")
         .allowlist_function("set_config_double")
         .allowlist_function("set_config_bool")

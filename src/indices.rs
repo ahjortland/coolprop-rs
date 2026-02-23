@@ -1,5 +1,5 @@
 use std::{
-    ffi::CString,
+    ffi::CStr,
     os::raw::{c_char, c_int, c_long},
     sync::OnceLock,
 };
@@ -7,6 +7,7 @@ use std::{
 use crate::Result;
 
 /// Thermodynamic phase labels exposed by the CoolProp C API.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 #[allow(missing_docs)]
 pub enum Phase {
@@ -61,24 +62,56 @@ impl Phase {
     }
 }
 
+impl std::fmt::Display for Phase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let label = match self {
+            Self::Liquid => "liquid",
+            Self::Supercritical => "supercritical",
+            Self::SupercriticalGas => "supercritical gas",
+            Self::SupercriticalLiquid => "supercritical liquid",
+            Self::CriticalPoint => "critical point",
+            Self::Gas => "gas",
+            Self::TwoPhase => "two-phase",
+            Self::Unknown => "unknown",
+            Self::NotImposed => "not imposed",
+        };
+        f.write_str(label)
+    }
+}
+
 macro_rules! coolprop_input_pairs {
     ($( $variant:ident => $name:literal ),+ $(,)?) => {
         #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
         #[repr(usize)]
+        #[non_exhaustive]
         #[allow(missing_docs)]
         pub enum InputPair {
             $( $variant, )+
         }
 
         impl InputPair {
+            /// All known CoolProp input-pair variants in declaration order.
             pub const ALL: &'static [InputPair] = &[
                 $( InputPair::$variant, )+
             ];
 
+            /// CoolProp token used by string-based APIs (for example, `"PT_INPUTS"`).
             #[inline]
             pub fn as_coolprop_str(self) -> &'static str {
                 match self {
                     $( InputPair::$variant => $name, )+
+                }
+            }
+
+            /// CoolProp token as a NUL-terminated C string.
+            #[inline]
+            pub fn as_coolprop_cstr(self) -> &'static std::ffi::CStr {
+                match self {
+                    $(
+                        InputPair::$variant => unsafe {
+                            std::ffi::CStr::from_bytes_with_nul_unchecked(concat!($name, "\0").as_bytes())
+                        },
+                    )+
                 }
             }
         }
@@ -125,20 +158,35 @@ macro_rules! coolprop_params {
     ($( $variant:ident => $name:literal ),+ $(,)?) => {
         #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
         #[repr(usize)]
+        #[non_exhaustive]
         #[allow(missing_docs)]
         pub enum Param {
             $( $variant, )+
         }
 
         impl Param {
+            /// All known CoolProp parameter variants in declaration order.
             pub const ALL: &'static [Param] = &[
                 $( Param::$variant, )+
             ];
 
+            /// CoolProp token used by string-based APIs (for example, `"T"` or `"Hmolar"`).
             #[inline]
             pub fn as_coolprop_str(self) -> &'static str {
                 match self {
                     $( Param::$variant => $name, )+
+                }
+            }
+
+            /// CoolProp token as a NUL-terminated C string.
+            #[inline]
+            pub fn as_coolprop_cstr(self) -> &'static std::ffi::CStr {
+                match self {
+                    $(
+                        Param::$variant => unsafe {
+                            std::ffi::CStr::from_bytes_with_nul_unchecked(concat!($name, "\0").as_bytes())
+                        },
+                    )+
                 }
             }
         }
@@ -230,6 +278,12 @@ coolprop_params! {
     D2Alpha0Ddelta2Consttau => "d2alpha0_ddelta2_consttau",
     D3Alpha0Ddelta3Consttau => "d3alpha0_ddelta3_consttau",
     Phase => "Phase",
+    Umolar0 => "Umolar_idealgas",
+    Hmolar0 => "Hmolar_idealgas",
+    Smolar0 => "Smolar_idealgas",
+    Umass0 => "Umass_idealgas",
+    Hmass0 => "Hmass_idealgas",
+    Smass0 => "Smass_idealgas",
 }
 
 pub(crate) struct Indices {
@@ -239,9 +293,8 @@ pub(crate) struct Indices {
 
 impl Indices {
     fn load() -> Self {
-        unsafe fn query(f: unsafe extern "C" fn(*const c_char) -> c_long, name: &str) -> c_long {
-            let s = CString::new(name).unwrap();
-            unsafe { f(s.as_ptr()) }
+        unsafe fn query(f: unsafe extern "C" fn(*const c_char) -> c_long, name: &CStr) -> c_long {
+            unsafe { f(name.as_ptr()) }
         }
 
         unsafe {
@@ -250,7 +303,7 @@ impl Indices {
                 for &pair in InputPair::ALL {
                     ids.push(query(
                         crate::ffi::get_input_pair_index,
-                        pair.as_coolprop_str(),
+                        pair.as_coolprop_cstr(),
                     ));
                 }
                 ids.into_boxed_slice()
@@ -259,10 +312,7 @@ impl Indices {
             let param_ids = {
                 let mut params = Vec::with_capacity(Param::ALL.len());
                 for &param in Param::ALL {
-                    params.push(query(
-                        crate::ffi::get_param_index,
-                        param.as_coolprop_str(),
-                    ));
+                    params.push(query(crate::ffi::get_param_index, param.as_coolprop_cstr()));
                 }
                 params.into_boxed_slice()
             };
@@ -295,5 +345,37 @@ pub(crate) fn global_indices() -> Result<&'static Indices> {
     match INDICES.set(computed) {
         Ok(_) => Ok(INDICES.get().expect("CoolProp indices initialized")),
         Err(_) => Ok(INDICES.get().expect("CoolProp indices initialized")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Phase;
+
+    #[test]
+    fn phase_from_code_and_tokens() {
+        // Known mappings
+        assert_eq!(Phase::from_code(0), Some(Phase::Liquid));
+        assert_eq!(Phase::from_code(5), Some(Phase::Gas));
+        assert_eq!(Phase::from_code(6), Some(Phase::TwoPhase));
+        assert_eq!(Phase::from_code(8), Some(Phase::NotImposed));
+        // Unknown code
+        assert_eq!(Phase::from_code(42), None);
+
+        // Specifier tokens are stable strings
+        assert_eq!(Phase::Liquid.specifier_token(), "phase_liquid");
+        assert_eq!(Phase::Gas.specifier_token(), "phase_gas");
+        assert_eq!(Phase::TwoPhase.specifier_token(), "phase_twophase");
+
+        // Saturation tokens only for liquid/gas/twophase
+        assert_eq!(Phase::Liquid.saturation_token(), Some("liquid"));
+        assert_eq!(Phase::Gas.saturation_token(), Some("gas"));
+        assert_eq!(Phase::TwoPhase.saturation_token(), Some("twophase"));
+        assert!(Phase::Supercritical.saturation_token().is_none());
+        assert!(Phase::NotImposed.saturation_token().is_none());
+
+        // Display labels are user-facing and should remain stable.
+        assert_eq!(Phase::Liquid.to_string(), "liquid");
+        assert_eq!(Phase::TwoPhase.to_string(), "two-phase");
     }
 }

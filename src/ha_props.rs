@@ -6,7 +6,7 @@
 
 use std::ffi::CString;
 
-use crate::{check_finite_and_report_error, ffi, Error, Result};
+use crate::{Error, Result, check_finite_and_report_error, ffi};
 
 /// Calculate psychrometric (humid air) properties.
 ///

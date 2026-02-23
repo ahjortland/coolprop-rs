@@ -10,7 +10,7 @@ fn main() -> Result<()> {
     // before the workers start. This avoids redundant fluid-library loads under concurrency.
     {
         let _ = props_si("P", "T", 300.0, "Q", 0.0, "Water")?;
-        let warm_state = AbstractState::new("HEOS", "Water")?;
+        let mut warm_state = AbstractState::new("HEOS", "Water")?;
         warm_state.update(InputPair::PT, 101_325.0, 300.0)?;
         let _ = warm_state.get(Param::Hmass)?;
     }
@@ -37,7 +37,7 @@ fn worker(idx: usize) -> Result<(usize, f64, f64, f64)> {
 
     let pressure = props_si("P", "T", temperature, "Dmolar", density, "Water")?;
 
-    let state = AbstractState::new("HEOS", "Water")?;
+    let mut state = AbstractState::new("HEOS", "Water")?;
     state.update(InputPair::PT, pressure, temperature)?;
     let enthalpy = state.get(Param::Hmass)?;
 

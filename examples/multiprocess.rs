@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, anyhow};
-use coolprop::{AbstractState, InputPair, Param, Phase};
+use coolprop::{AbstractState, InputPair, Param};
 use std::{
     env,
     process::{Command, Stdio},
@@ -59,7 +59,7 @@ fn run_coordinator() -> Result<()> {
 }
 
 fn run_worker(id: usize) -> Result<()> {
-    let state = AbstractState::new("HEOS", "Water")
+    let mut state = AbstractState::new("HEOS", "Water")
         .with_context(|| format!("worker {id} failed to construct AbstractState"))?;
 
     let scenarios = [
@@ -100,7 +100,7 @@ density = {density:.4} kg/m^3, enthalpy = {enthalpy:.2} J/kg",
             id = id,
             temperature = scenario.temperature,
             pressure = scenario.pressure,
-            phase = describe_phase(phase)
+            phase = phase
         );
     }
 
@@ -114,18 +114,4 @@ density = {density:.4} kg/m^3, enthalpy = {enthalpy:.2} J/kg",
 struct Scenario {
     pressure: f64,
     temperature: f64,
-}
-
-fn describe_phase(phase: Phase) -> &'static str {
-    match phase {
-        Phase::Liquid => "liquid",
-        Phase::Supercritical => "supercritical",
-        Phase::SupercriticalGas => "supercritical gas",
-        Phase::SupercriticalLiquid => "supercritical liquid",
-        Phase::CriticalPoint => "critical point",
-        Phase::Gas => "gas",
-        Phase::TwoPhase => "two-phase",
-        Phase::Unknown => "unknown",
-        Phase::NotImposed => "not imposed",
-    }
 }

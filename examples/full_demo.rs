@@ -1,7 +1,5 @@
 use anyhow::{Context, Result};
-use coolprop::{
-    AbstractState, InputPair, Param, Phase, global_param_string, ha_props_si, props_si,
-};
+use coolprop::{AbstractState, InputPair, Param, global_param_string, ha_props_si, props_si};
 use std::time::Instant;
 
 fn main() -> Result<()> {
@@ -18,7 +16,7 @@ fn main() -> Result<()> {
     println!("CoolProp Fluids: {}", global_param_string("FluidsList")?);
 
     println!("*********** HIGH LEVEL INTERFACE *****************");
-    let water = AbstractState::new("HEOS", "Water").context("creating water AbstractState")?;
+    let mut water = AbstractState::new("HEOS", "Water").context("creating water AbstractState")?;
     let tcrit = water.get(Param::TCritical)?;
     println!("Critical temperature of water: {tcrit} K");
 
@@ -27,7 +25,8 @@ fn main() -> Result<()> {
     println!("Boiling temperature of water at 101325 Pa: {boiling} K");
 
     let t = 300.0;
-    let phase = phase_string(&water, pressure, t)?;
+    water.update(InputPair::PT, pressure, t)?;
+    let phase = water.phase()?;
     println!("Phase of water at 101325 Pa and 300 K: {phase}");
 
     let cp = props_si("C", "P", pressure, "T", t, "Water")?;
@@ -55,7 +54,7 @@ fn main() -> Result<()> {
 
     println!("*********** TABULAR BACKENDS *****************");
     match AbstractState::new("BICUBIC&HEOS", "R245fa") {
-        Ok(tab) => {
+        Ok(mut tab) => {
             tab.update(InputPair::PT, pressure, t)?;
             println!(
                 "Mass density of refrigerant R245fa at 300 K, 101325 Pa: {} kg/m^3",
@@ -66,13 +65,13 @@ fn main() -> Result<()> {
     }
 
     println!("*********** SATURATION DERIVATIVES (LOW-LEVEL INTERFACE) ***************");
-    let sat = AbstractState::new("HEOS", "R245fa")?;
+    let mut sat = AbstractState::new("HEOS", "R245fa")?;
     sat.update(InputPair::PQ, pressure, 0.0)?;
     let derivative = sat.first_saturation_deriv(Param::P, Param::T)?;
     println!("First saturation derivative: {derivative} Pa/K");
 
     println!("*********** LOW-LEVEL INTERFACE *****************");
-    let mixture = AbstractState::new("HEOS", "Water&Ethanol")?;
+    let mut mixture = AbstractState::new("HEOS", "Water&Ethanol")?;
     mixture.set_fractions(&[0.5, 0.5])?;
     mixture.update(InputPair::PQ, pressure, 1.0)?;
     println!(
@@ -87,23 +86,6 @@ fn main() -> Result<()> {
 
     println!("Example completed in {:?}", start.elapsed());
     Ok(())
-}
-
-fn phase_string(state: &AbstractState, pressure: f64, t: f64) -> Result<String> {
-    state.update(InputPair::PT, pressure, t)?;
-    let phase = state.phase()?;
-    let label = match phase {
-        Phase::Liquid => "liquid",
-        Phase::Supercritical => "supercritical",
-        Phase::SupercriticalGas => "supercritical gas",
-        Phase::SupercriticalLiquid => "supercritical liquid",
-        Phase::CriticalPoint => "critical point",
-        Phase::Gas => "gas",
-        Phase::TwoPhase => "two-phase",
-        Phase::Unknown => "unknown",
-        Phase::NotImposed => "not imposed",
-    };
-    Ok(label.to_string())
 }
 
 fn refprop_demo() -> Result<()> {
@@ -124,7 +106,7 @@ fn refprop_demo() -> Result<()> {
 }
 
 fn refprop_low_level() -> Result<()> {
-    let state = AbstractState::new("REFPROP", "METHANE&ETHANE")?;
+    let mut state = AbstractState::new("REFPROP", "METHANE&ETHANE")?;
     state.set_fractions(&[0.2, 0.8])?;
     state.update(InputPair::QT, 1.0, 120.0)?;
     let dmolar = state.get(Param::Dmolar)?;

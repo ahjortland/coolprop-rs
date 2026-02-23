@@ -44,7 +44,7 @@ Use `AbstractState` when you need an owned CoolProp backend with iterative updat
 use coolprop::{AbstractState, InputPair, Param};
 
 fn radial_compressor_case() -> coolprop::Result<f64> {
-    let state = AbstractState::new("HEOS", "R134a")?;
+    let mut state = AbstractState::new("HEOS", "R134a")?;
     state.update(InputPair::PT, 800_000.0, 280.0)?;
     Ok(state.get(Param::Hmass)?)
 }

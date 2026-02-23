@@ -4,11 +4,15 @@ mod common;
 use anyhow::Result;
 use common::{assert_close, test_lock};
 use coolprop::{AbstractState, InputPair, Param, Phase, props_si};
+use static_assertions::{assert_impl_all, assert_not_impl_any};
+
+assert_impl_all!(AbstractState: Send);
+assert_not_impl_any!(AbstractState: Sync);
 
 #[test]
 fn basic_state_metadata() -> Result<()> {
     let _guard = test_lock().lock().unwrap();
-    let state = AbstractState::new("HEOS", "R134a")?;
+    let mut state = AbstractState::new("HEOS", "R134a")?;
 
     let handle = state.handle();
     assert!(
@@ -39,9 +43,57 @@ fn basic_state_metadata() -> Result<()> {
 }
 
 #[test]
-fn update_and_retrieve_properties() -> Result<()> {
+fn debug_includes_runtime_metadata() -> Result<()> {
     let _guard = test_lock().lock().unwrap();
     let state = AbstractState::new("HEOS", "R134a")?;
+    let dbg = format!("{state:?}");
+    assert!(
+        dbg.contains("AbstractState"),
+        "Debug output should identify the type"
+    );
+    assert!(
+        dbg.contains("HelmholtzEOSBackend"),
+        "Debug output should include backend metadata"
+    );
+    assert!(
+        dbg.contains("R134a"),
+        "Debug output should include fluid metadata"
+    );
+    Ok(())
+}
+
+#[test]
+fn try_clone_reconstructs_state() -> Result<()> {
+    let _guard = test_lock().lock().unwrap();
+    let mut state = AbstractState::new("HEOS", "R32&R125")?;
+    let fractions = [0.4, 0.6];
+    state.set_fractions(&fractions)?;
+    state.update(InputPair::PT, 3.0e5, 290.0)?;
+
+    let mut cloned = state.try_clone()?;
+    let cloned_fractions = cloned.mole_fractions()?;
+    assert_eq!(cloned_fractions.len(), fractions.len());
+    for (idx, &value) in cloned_fractions.iter().enumerate() {
+        assert_close(
+            value,
+            fractions[idx],
+            1e-9,
+            1e-12,
+            "cloned mole fraction retrieval",
+        );
+    }
+
+    cloned.update(InputPair::PT, 3.0e5, 290.0)?;
+    let cloned_pressure = cloned.pressure()?;
+    assert_close(cloned_pressure, 3.0e5, 1e-12, 1e-3, "cloned state pressure");
+
+    Ok(())
+}
+
+#[test]
+fn update_and_retrieve_properties() -> Result<()> {
+    let _guard = test_lock().lock().unwrap();
+    let mut state = AbstractState::new("HEOS", "R134a")?;
 
     let pressure = 1.0e5;
     let temperature = 300.0;
@@ -84,7 +136,7 @@ fn update_and_retrieve_properties() -> Result<()> {
 #[test]
 fn saturation_queries() -> Result<()> {
     let _guard = test_lock().lock().unwrap();
-    let state = AbstractState::new("HEOS", "R134a")?;
+    let mut state = AbstractState::new("HEOS", "R134a")?;
     let sat_temp = 260.0;
 
     state.update(InputPair::QT, 0.0, sat_temp)?;
@@ -126,7 +178,7 @@ fn saturation_queries() -> Result<()> {
 #[test]
 fn derivative_queries() -> Result<()> {
     let _guard = test_lock().lock().unwrap();
-    let state = AbstractState::new("HEOS", "R134a")?;
+    let mut state = AbstractState::new("HEOS", "R134a")?;
 
     state.update(InputPair::PT, 8.0e5, 320.0)?;
     let first_partial = state.first_partial_deriv(Param::Smolar, Param::T, Param::P)?;
@@ -186,7 +238,14 @@ fn derivative_queries() -> Result<()> {
 #[test]
 fn fractions_and_fugacity() -> Result<()> {
     let _guard = test_lock().lock().unwrap();
-    let state = AbstractState::new("HEOS", "R32&R125")?;
+    let mut state = AbstractState::new("HEOS", "R32&R125")?;
+    let mass_fractions = [0.55, 0.45];
+    state.set_mass_fractions(&mass_fractions)?;
+    let current_mass = state.mass_fractions()?;
+    assert_eq!(current_mass.len(), mass_fractions.len());
+    let sum_mass: f64 = current_mass.iter().sum();
+    assert_close(sum_mass, 1.0, 1e-6, 1e-9, "mass fractions sum");
+
     let fractions = [0.4, 0.6];
     state.set_fractions(&fractions)?;
 
@@ -232,7 +291,7 @@ fn fractions_and_fugacity() -> Result<()> {
 #[test]
 fn batch_updates() -> Result<()> {
     let _guard = test_lock().lock().unwrap();
-    let state = AbstractState::new("HEOS", "R134a")?;
+    let mut state = AbstractState::new("HEOS", "R134a")?;
 
     let pressures = [1.0e5, 2.0e5, 3.0e5];
     let temperatures = [280.0, 300.0, 320.0];
@@ -336,7 +395,7 @@ fn batch_updates() -> Result<()> {
 #[test]
 fn envelope_spinodal_and_critical_points() -> Result<()> {
     let _guard = test_lock().lock().unwrap();
-    let state = AbstractState::new("HEOS", "R32&R125")?;
+    let mut state = AbstractState::new("HEOS", "R32&R125")?;
     state.set_fractions(&[0.5, 0.5])?;
 
     state.build_phase_envelope("none")?;
@@ -406,7 +465,7 @@ fn envelope_spinodal_and_critical_points() -> Result<()> {
 #[test]
 fn cubic_parameter_mutators() -> Result<()> {
     let _guard = test_lock().lock().unwrap();
-    let state = AbstractState::new("PR", "Methane&Ethane")?;
+    let mut state = AbstractState::new("PR", "Methane&Ethane")?;
     state.set_fractions(&[0.5, 0.5])?;
 
     state.set_binary_interaction_double(0, 1, "kij", 0.05)?;
