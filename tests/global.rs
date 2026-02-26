@@ -46,5 +46,7 @@ fn phase_si_returns_phase_label() {
 #[test]
 fn set_reference_state_accepts_default_reset() {
     let _guard = test_lock().lock().unwrap();
+    set_reference_state("Water", "default")
+        .expect("setting default reference state should succeed");
     set_reference_state("Water", "DEF").expect("setting DEF reference state should succeed");
 }

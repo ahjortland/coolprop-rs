@@ -503,17 +503,27 @@ impl AbstractState {
     ///
     /// `fractions` must sum to one; interpretation is backend dependent.
     pub fn set_mass_fractions(&mut self, fractions: &[f64]) -> Result<()> {
-        let len = fractions.len() as c_long;
-        call_with_error(|err, msg, buflen| unsafe {
-            crate::ffi::AbstractState_set_mass_fractions(
-                self.handle,
-                fractions.as_ptr(),
-                len,
-                err,
-                msg,
-                buflen,
-            );
-        })
+        #[cfg(coolprop_has_abstractstate_set_mass_fractions)]
+        {
+            let len = fractions.len() as c_long;
+            call_with_error(|err, msg, buflen| unsafe {
+                crate::ffi::AbstractState_set_mass_fractions(
+                    self.handle,
+                    fractions.as_ptr(),
+                    len,
+                    err,
+                    msg,
+                    buflen,
+                );
+            })
+        }
+        #[cfg(not(coolprop_has_abstractstate_set_mass_fractions))]
+        {
+            let _ = fractions;
+            Err(Error::InvalidInput(
+                "this CoolProp build does not expose AbstractState_set_mass_fractions".into(),
+            ))
+        }
     }
 
     fn estimated_component_capacity(&self) -> Result<usize> {
@@ -565,39 +575,48 @@ impl AbstractState {
 
     /// Retrieve the current mass composition as a vector with automatic sizing.
     pub fn mass_fractions(&self) -> Result<Vec<f64>> {
-        let mut capacity = self.estimated_component_capacity()?;
-        loop {
-            let mut fractions = vec![0.0; capacity];
-            let mut count: c_long = 0;
-            match call_with_error(|err, msg, buflen| unsafe {
-                crate::ffi::AbstractState_get_mass_fractions(
-                    self.handle,
-                    fractions.as_mut_ptr(),
-                    capacity as c_long,
-                    &mut count,
-                    err,
-                    msg,
-                    buflen,
-                );
-            }) {
-                Ok(()) => {
-                    let actual = count.max(0) as usize;
-                    if actual > capacity {
-                        capacity = actual.max(capacity * 2);
-                        continue;
+        #[cfg(coolprop_has_abstractstate_get_mass_fractions)]
+        {
+            let mut capacity = self.estimated_component_capacity()?;
+            loop {
+                let mut fractions = vec![0.0; capacity];
+                let mut count: c_long = 0;
+                match call_with_error(|err, msg, buflen| unsafe {
+                    crate::ffi::AbstractState_get_mass_fractions(
+                        self.handle,
+                        fractions.as_mut_ptr(),
+                        capacity as c_long,
+                        &mut count,
+                        err,
+                        msg,
+                        buflen,
+                    );
+                }) {
+                    Ok(()) => {
+                        let actual = count.max(0) as usize;
+                        if actual > capacity {
+                            capacity = actual.max(capacity * 2);
+                            continue;
+                        }
+                        fractions.truncate(actual);
+                        return Ok(fractions);
                     }
-                    fractions.truncate(actual);
-                    return Ok(fractions);
-                }
-                Err(err) => {
-                    let msg = err.to_string();
-                    if msg.contains("buffer") || msg.contains("Length of array") {
-                        capacity = capacity.max(1) * 2;
-                        continue;
+                    Err(err) => {
+                        let msg = err.to_string();
+                        if msg.contains("buffer") || msg.contains("Length of array") {
+                            capacity = capacity.max(1) * 2;
+                            continue;
+                        }
+                        return Err(err);
                     }
-                    return Err(err);
                 }
             }
+        }
+        #[cfg(not(coolprop_has_abstractstate_get_mass_fractions))]
+        {
+            Err(Error::InvalidInput(
+                "this CoolProp build does not expose AbstractState_get_mass_fractions".into(),
+            ))
         }
     }
 

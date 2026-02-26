@@ -319,8 +319,46 @@ fn generate_bindings(include_dir: Option<String>) {
         .generate()
         .expect("bindgen generation failed");
 
+    let bindings_src = bindings.to_string();
+    emit_symbol_cfg(
+        &bindings_src,
+        "get_config_bool",
+        "coolprop_has_get_config_bool",
+    );
+    emit_symbol_cfg(
+        &bindings_src,
+        "get_config_double",
+        "coolprop_has_get_config_double",
+    );
+    emit_symbol_cfg(
+        &bindings_src,
+        "get_config_string",
+        "coolprop_has_get_config_string",
+    );
+    emit_symbol_cfg(
+        &bindings_src,
+        "AbstractState_set_mass_fractions",
+        "coolprop_has_abstractstate_set_mass_fractions",
+    );
+    emit_symbol_cfg(
+        &bindings_src,
+        "AbstractState_get_mass_fractions",
+        "coolprop_has_abstractstate_get_mass_fractions",
+    );
+
     let out_path = PathBuf::from(env::var("OUT_DIR").unwrap()).join("bindings.rs");
-    bindings
-        .write_to_file(out_path)
+    fs::write(&out_path, bindings_src)
         .expect("failed to write bindgen output");
+}
+
+fn emit_symbol_cfg(bindings_src: &str, symbol: &str, cfg_name: &str) {
+    println!("cargo:rustc-check-cfg=cfg({cfg_name})");
+    let needle = format!("pub fn {symbol}(");
+    if bindings_src.contains(&needle) {
+        println!("cargo:rustc-cfg={cfg_name}");
+    } else {
+        println!(
+            "cargo:warning=CoolProp header is missing `{symbol}`; enabling compatibility fallback"
+        );
+    }
 }

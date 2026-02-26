@@ -215,6 +215,15 @@ pub fn phase_si(name1: &str, prop1: f64, name2: &str, prop2: f64, fluid: &str) -
 
 /// Set the reference-state convention for a fluid (`"IIR"`, `"ASHRAE"`, `"NBP"`, `"DEF"`).
 pub fn set_reference_state(fluid: &str, reference_state: &str) -> Result<()> {
+    let reference_state = match reference_state.trim() {
+        state if state.eq_ignore_ascii_case("default") || state.eq_ignore_ascii_case("def") => {
+            "DEF"
+        }
+        state if state.eq_ignore_ascii_case("iir") => "IIR",
+        state if state.eq_ignore_ascii_case("ashrae") => "ASHRAE",
+        state if state.eq_ignore_ascii_case("nbp") => "NBP",
+        state => state,
+    };
     let fluid_c = CString::new(fluid).map_err(|source| Error::EmbeddedNul {
         label: "fluid",
         source,
@@ -307,12 +316,22 @@ pub fn get_config_bool(key: &str) -> Result<bool> {
         label: "config key",
         source,
     })?;
-    let mut value = false;
-    let status = unsafe { ffi::get_config_bool(key_c.as_ptr(), &mut value) };
-    if status == 1 {
-        Ok(value)
-    } else {
-        Err(coolprop_global_error(&format!("get_config_bool({key})")))
+    #[cfg(coolprop_has_get_config_bool)]
+    {
+        let mut value = false;
+        let status = unsafe { ffi::get_config_bool(key_c.as_ptr(), &mut value) };
+        if status == 1 {
+            Ok(value)
+        } else {
+            Err(coolprop_global_error(&format!("get_config_bool({key})")))
+        }
+    }
+    #[cfg(not(coolprop_has_get_config_bool))]
+    {
+        let _ = key_c;
+        Err(Error::InvalidInput(
+            "this CoolProp build does not expose get_config_bool".into(),
+        ))
     }
 }
 
@@ -322,12 +341,22 @@ pub fn get_config_double(key: &str) -> Result<f64> {
         label: "config key",
         source,
     })?;
-    let mut value = 0.0f64;
-    let status = unsafe { ffi::get_config_double(key_c.as_ptr(), &mut value) };
-    if status == 1 {
-        Ok(value)
-    } else {
-        Err(coolprop_global_error(&format!("get_config_double({key})")))
+    #[cfg(coolprop_has_get_config_double)]
+    {
+        let mut value = 0.0f64;
+        let status = unsafe { ffi::get_config_double(key_c.as_ptr(), &mut value) };
+        if status == 1 {
+            Ok(value)
+        } else {
+            Err(coolprop_global_error(&format!("get_config_double({key})")))
+        }
+    }
+    #[cfg(not(coolprop_has_get_config_double))]
+    {
+        let _ = key_c;
+        Err(Error::InvalidInput(
+            "this CoolProp build does not expose get_config_double".into(),
+        ))
     }
 }
 
@@ -337,19 +366,30 @@ pub fn get_config_string(key: &str) -> Result<String> {
         label: "config key",
         source,
     })?;
-    let mut capacity = 256usize;
-    loop {
-        let mut buffer = vec![0 as c_char; capacity];
-        let status =
-            unsafe { ffi::get_config_string(key_c.as_ptr(), buffer.as_mut_ptr(), capacity as i32) };
-        if status == 1 {
-            buffer[capacity - 1] = 0;
-            return Ok(c_buf_to_string(&buffer));
+    #[cfg(coolprop_has_get_config_string)]
+    {
+        let mut capacity = 256usize;
+        loop {
+            let mut buffer = vec![0 as c_char; capacity];
+            let status = unsafe {
+                ffi::get_config_string(key_c.as_ptr(), buffer.as_mut_ptr(), capacity as i32)
+            };
+            if status == 1 {
+                buffer[capacity - 1] = 0;
+                return Ok(c_buf_to_string(&buffer));
+            }
+            if capacity >= (1 << 20) {
+                return Err(coolprop_global_error(&format!("get_config_string({key})")));
+            }
+            capacity *= 2;
         }
-        if capacity >= (1 << 20) {
-            return Err(coolprop_global_error(&format!("get_config_string({key})")));
-        }
-        capacity *= 2;
+    }
+    #[cfg(not(coolprop_has_get_config_string))]
+    {
+        let _ = key_c;
+        Err(Error::InvalidInput(
+            "this CoolProp build does not expose get_config_string".into(),
+        ))
     }
 }
 
